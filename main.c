@@ -84,17 +84,22 @@ int insert_in_to_buffer(struct ring_buffer *rb, char *command){
         printf("Command will be split!\n ");
         printf("Space left in the buffer: %d\n", get_free_slots_left_in_the_buffer(rb));
         printf("Space left in the current turn of the buffer: %d\n", remaining_space);
-        printf("Command length: %d\n", required_length);
+        printf("Rquired length: %d\n", required_length);
 
         /* Need to add the command here */
         void *full_cmd = malloc(required_length);
+        struct varied_length_command_info cmd_info;
+        cmd_info.command_lenght = command_size;
+        memcpy(full_cmd, &cmd_info, cmd_info_size);
+        memcpy(full_cmd+cmd_info_size, command, command_size+1);
+
 
         int reminder = required_length-remaining_space;
-        void *addr_of_buffer = &rb[rb->head];
+        void *addr_of_buffer = &rb->buffer[rb->head];
         void *addr_of_entry = full_cmd;
         memcpy(addr_of_buffer, addr_of_entry, remaining_space);
         printf("First memcopy worked\n");
-        addr_of_buffer = &rb[0];
+        addr_of_buffer = &rb->buffer[0];
         addr_of_entry+=remaining_space;
         memcpy(addr_of_buffer, addr_of_entry, reminder);
         printf("Second memcopy worked\n");
@@ -156,16 +161,21 @@ struct cmd_and_next_index *retrieve_command_at_index(struct ring_buffer *rb, int
     /* Special case when the struct will need to be copied partially */
     /* Case 1: cmd info is split between ring buffer turns. */
     if(space_left_in_this_turn < sizeof(struct varied_length_command_info)){
+        printf("Executing the case with a split cmd info\n");
         struct varied_length_command_info *cmd_info = malloc(sizeof (struct varied_length_command_info));
         void *cmd_addr_ptr = cmd_info;
-        void *current_turn_address = &rb[index];
+
+        void *current_turn_address = &rb->buffer[index];
         int remainder = sizeof (struct varied_length_command_info) - space_left_in_this_turn;
+        printf("Copying %d bytes to cmd_info\n", space_left_in_this_turn);
         memcpy(cmd_addr_ptr, current_turn_address, space_left_in_this_turn);
         void *start_addr = &rb->buffer[0];
         cmd_addr_ptr+=space_left_in_this_turn;
+        printf("Copying %d bytes to cmd_info\n", remainder);
         memcpy(cmd_addr_ptr, start_addr, remainder);
+        printf("Command length according to cmd info: %d\n", cmd_info->command_lenght);
         int cmd_l = cmd_info->command_lenght;
-        void *cmd_start_addr = &rb[0]+remainder;
+        void *cmd_start_addr = &rb->buffer[0]+remainder;
         char *extracted_command = malloc(cmd_info->command_lenght);
         struct cmd_and_next_index *data = malloc(sizeof (struct cmd_and_next_index));
         /* Questionable */
@@ -247,9 +257,23 @@ int main() {
     // When we establish communication we send the information about ring buffer to the consumer;
     //Consumer sends request to read command at the specific index
     //Once the index has been read the value latest_read_index is updated and head can move to up to the latest read index -1;
-
+    int cmd_index = 0;
+    /* Case 1 */
     insert(rb, "abcd");
-    struct cmd_and_next_index *cmd_data = retrieve_command_at_index(rb, 0);
+    struct cmd_and_next_index *cmd_data = retrieve_command_at_index(rb, cmd_index);
+    cmd_index = cmd_data->next_index;
+    printf("Extracted command: %s, next index: %d\n", cmd_data->command, cmd_data->next_index);
+
+    /* Case 2 */
+    insert(rb, "abcd");
+    cmd_data = retrieve_command_at_index(rb, cmd_index);
+    cmd_index = cmd_data->next_index;
+    printf("Extracted command: %s, next index: %d\n", cmd_data->command, cmd_data->next_index);
+
+    /* Case 3 */
+    insert(rb, "abcd");
+    cmd_data = retrieve_command_at_index(rb, cmd_index);
+    cmd_index = cmd_data->next_index;
     printf("Extracted command: %s, next index: %d\n", cmd_data->command, cmd_data->next_index);
 
     return 0;
