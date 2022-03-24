@@ -7,6 +7,7 @@
 #include <malloc.h>
 
 struct ring_buffer{
+    unsigned int number_of_commands;
     unsigned int head;
     unsigned int tail;
     unsigned int size;
@@ -33,7 +34,7 @@ unsigned int get_free_slots_left_in_the_buffer(struct ring_buffer *rb){
 }
 
 bool buffer_has_space_for_command(struct ring_buffer *rb, int command_lenght){
-    return (get_free_slots_left_in_the_buffer(rb) - sizeof (struct varied_length_command_info) - command_lenght) > 0;
+    return (get_free_slots_left_in_the_buffer(rb) - sizeof (struct varied_length_command_info) - command_lenght) >= 0;
 }
 
 
@@ -72,27 +73,25 @@ void print_buffer_content(struct ring_buffer *rb){
 }
 
 int insert_in_to_buffer(struct ring_buffer *rb, char *command){
-    /* What happens when the entry fits exactly in to the size of the buffer? */
-    /* First check if we can fit the command with it's data within the current buffer's length. */
     unsigned int command_size = strlen(command);
     int cmd_info_size = sizeof (struct varied_length_command_info);
     int required_length = command_size+cmd_info_size;
+    printf("required lenght: %d, space left: %d\n", required_length, rb->real_size-rb->head);
 
     /* Special case when we can not fit entry in to a contiguous range*/
-    if(rb->head > rb->tail && rb->real_size - rb->head < required_length){
+    //rb->head >= rb->tail &&
+    if( rb->real_size - rb->head < required_length){
         int remaining_space = rb->real_size - rb->head;
         printf("Command will be split!\n ");
         printf("Space left in the buffer: %d\n", get_free_slots_left_in_the_buffer(rb));
         printf("Space left in the current turn of the buffer: %d\n", remaining_space);
         printf("Rquired length: %d\n", required_length);
 
-        /* Need to add the command here */
         void *full_cmd = malloc(required_length);
         struct varied_length_command_info cmd_info;
         cmd_info.command_lenght = command_size;
         memcpy(full_cmd, &cmd_info, cmd_info_size);
         memcpy(full_cmd+cmd_info_size, command, command_size+1);
-
 
         int reminder = required_length-remaining_space;
         void *addr_of_buffer = &rb->buffer[rb->head];
@@ -121,13 +120,7 @@ int insert_in_to_buffer(struct ring_buffer *rb, char *command){
 
         memcpy(command_slot, command, strlen(command)+1);
         printf("Written to slot: %s\n", command_slot);
-        //command_slot = command_slot + strlen(command);
         rb->head += sizeof(struct varied_length_command_info) + strlen(command);
-
-        /* TODO */
-        //Handle the case when the end of the buffer is reached.
-        //rb->buffer[rb->head] = command;
-        //rb->head = (rb->head + 1) % rb->size;
         return 0;
     }
 }
@@ -138,6 +131,7 @@ int insert_in_to_buffer(struct ring_buffer *rb, char *command){
 int insert(struct ring_buffer *rb, char *command){
     if(buffer_has_space_for_command(rb, strlen(command)) > 0){
         insert_in_to_buffer(rb, command);
+        rb->number_of_commands+=1;
         return 0;
     }
     printf("No space to insert the entry, dropping!\n");
@@ -149,11 +143,11 @@ int insert(struct ring_buffer *rb, char *command){
  * */
 struct cmd_and_next_index *retrieve_command_at_index(struct ring_buffer *rb, int index){
 
-    if(buffer_is_empty(rb)){
+    if(rb->number_of_commands == 0){
         printf("Buffer is empty\n");
         return NULL;
     }
-
+    rb->number_of_commands-=1;
 
     //First check if current index fits the size of the info block
 
@@ -196,8 +190,10 @@ struct cmd_and_next_index *retrieve_command_at_index(struct ring_buffer *rb, int
         int space_left_for_command = rb->real_size-(index+sizeof (struct varied_length_command_info));
         /* Case 2: when info is within current turn of the buffer, but the command is not */
         if(cmd_info->command_lenght > space_left_for_command){
+            printf("Executing 2nd edge case\n");
+            printf("Reading directly from buffer: %s\n", &rb->buffer[index]+sizeof (struct varied_length_command_info));
             void *destination = extracted_command;
-            memcpy(destination, cmd_info_addr+sizeof (struct varied_length_command_info), space_left_for_command);
+            memcpy(destination, &rb->buffer[index]+sizeof (struct varied_length_command_info), space_left_for_command);
             void *src = &rb->buffer[0];
             destination+=space_left_for_command;
             memcpy(destination, src, cmd_info->command_lenght-space_left_for_command);
@@ -219,9 +215,6 @@ struct cmd_and_next_index *retrieve_command_at_index(struct ring_buffer *rb, int
             rb->tail = index;
             return data;
         }
-
-
-
     }
 }
 
@@ -245,6 +238,14 @@ struct ring_buffer * initialise_ring_buffer_on_persistent_memory(PMEMobjpool *po
     return &rootp->rb;
 }
 
+void print_head_and_tail(struct ring_buffer *rb){
+    printf("Head is at: %d, Tail is at: %d\n", rb->head, rb->tail);
+}
+
+void print_commands_in_the_byffer(struct ring_buffer *rb){
+    printf("Commands in the buffer: %d\n", rb->number_of_commands);
+}
+
 int main() {
     PMEMobjpool *pop;
     struct ring_buffer *rb = initialise_ring_buffer_on_persistent_memory(pop);
@@ -252,11 +253,10 @@ int main() {
     rb->real_size = rb->size-1;
     rb->head = 0;
     rb->tail = 0;
+    rb->number_of_commands = 0;
     printf("Initialized ring_buffer\n");
     print_available_buffer_slots(rb);
-    // When we establish communication we send the information about ring buffer to the consumer;
-    //Consumer sends request to read command at the specific index
-    //Once the index has been read the value latest_read_index is updated and head can move to up to the latest read index -1;
+
     int cmd_index = 0;
     /* Case 1 */
     insert(rb, "abcd");
@@ -275,6 +275,45 @@ int main() {
     cmd_data = retrieve_command_at_index(rb, cmd_index);
     cmd_index = cmd_data->next_index;
     printf("Extracted command: %s, next index: %d\n", cmd_data->command, cmd_data->next_index);
+    print_available_buffer_slots(rb);
+
+    print_head_and_tail(rb);
+    /* Extracting nonexistent command */
+    cmd_data = retrieve_command_at_index(rb, cmd_index);
+
+
+    /* Case 4 */
+
+    insert(rb, "abcd");
+    print_head_and_tail(rb);
+    cmd_data = retrieve_command_at_index(rb, cmd_index);
+    cmd_index = cmd_data->next_index;
+    print_head_and_tail(rb);
+    print_available_buffer_slots(rb);
+    print_commands_in_the_byffer(rb);
+
+    /* Case 5 Fits exactly in to the buffer length */
+    insert(rb, "ab");
+    cmd_data = retrieve_command_at_index(rb, cmd_index);
+    cmd_index = cmd_data->next_index;
+    printf("Next index is: %d\n", cmd_index);
+    print_head_and_tail(rb);
+
+    /* Case 6 starts from 0 */
+    insert(rb, "cd");
+    cmd_data = retrieve_command_at_index(rb, cmd_index);
+    cmd_index = cmd_data->next_index;
+    printf("Next index is: %d \n", cmd_index);
+    print_head_and_tail(rb);
+
+    /* Case 7 */
+
+    insert(rb, "abcdefghijklmn");
+    cmd_data = retrieve_command_at_index(rb, cmd_index);
+    printf("Retrieved command :%s\n", cmd_data->command);
+    cmd_index = cmd_data->next_index;
+    printf("Next index is: %d \n", cmd_index);
+    print_head_and_tail(rb);
 
     return 0;
 }
