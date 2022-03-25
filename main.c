@@ -5,7 +5,9 @@
 #include <unistd.h>
 #include <string.h>
 #include <malloc.h>
+#include <assert.h>
 
+typedef struct assert assert;
 struct ring_buffer{
     unsigned int number_of_commands;
     unsigned int head;
@@ -20,7 +22,6 @@ struct pmem_obj_root{
 };
 
 struct varied_length_command_info{
-    int id;
     int command_lenght;
 };
 
@@ -29,8 +30,9 @@ struct cmd_and_next_index{
     int next_index;
 };
 
+
 unsigned int get_free_slots_left_in_the_buffer(struct ring_buffer *rb){
-    return rb->head > rb->tail ? rb->real_size-rb->head + rb->tail : rb->head + rb->real_size-rb->tail;
+    return rb->head > rb->tail ? rb->real_size-rb->head + rb->tail : rb->tail - rb->head;
 }
 
 bool buffer_has_space_for_command(struct ring_buffer *rb, int command_lenght){
@@ -42,36 +44,6 @@ void print_available_buffer_slots(struct ring_buffer *rb){
     printf("There are %d free slot/s in the buffer\n", get_free_slots_left_in_the_buffer(rb));
 }
 
-bool buffer_is_empty(struct ring_buffer *rb){
-    return rb->head == rb->tail;
-}
-
-/* TODO
- * Update to get the number of commands for commands without fixed size.
- * */
-unsigned int get_number_of_entries(struct ring_buffer *rb){
-    signed int result = rb->head - rb->tail;
-    if(result > 0){
-        return result;
-    }
-    if(result < 0){
-        result = rb->size - (rb->tail - rb->head);
-        return result;
-    }
-    return 0;
-}
-
-/* TODO
- * Update to get the number of commands for commands without fixed size.
- * */
-void print_buffer_content(struct ring_buffer *rb){
-    unsigned int entries = get_number_of_entries(rb);
-    printf("Number of elements: %d\n", entries);
-    for(int i=0; i < entries; i++){
-        printf("Buffer entry: %c\n", rb->buffer[i]);
-    }
-}
-
 int insert_in_to_buffer(struct ring_buffer *rb, char *command){
     unsigned int command_size = strlen(command);
     int cmd_info_size = sizeof (struct varied_length_command_info);
@@ -79,7 +51,6 @@ int insert_in_to_buffer(struct ring_buffer *rb, char *command){
     printf("required lenght: %d, space left: %d\n", required_length, rb->real_size-rb->head);
 
     /* Special case when we can not fit entry in to a contiguous range*/
-    //rb->head >= rb->tail &&
     if( rb->real_size - rb->head < required_length){
         int remaining_space = rb->real_size - rb->head;
         printf("Command will be split!\n ");
@@ -125,22 +96,20 @@ int insert_in_to_buffer(struct ring_buffer *rb, char *command){
     }
 }
 
-/* TODO
- * Update to get the number of commands for commands without fixed size.
- * */
 int insert(struct ring_buffer *rb, char *command){
-    if(buffer_has_space_for_command(rb, strlen(command)) > 0){
+    if(strlen (command) + sizeof (struct varied_length_command_info) >= rb->size){
+        printf("No space to insert this entry, dropping!\n");
+        return 1;
+    }
+    if(buffer_has_space_for_command(rb, sizeof command) > 0){
         insert_in_to_buffer(rb, command);
         rb->number_of_commands+=1;
         return 0;
     }
-    printf("No space to insert the entry, dropping!\n");
+    printf("No space to insert this entry, dropping!\n");
     return 1;
 }
 
-/* TODO
- * Update to get the number of commands for commands without fixed size.
- * */
 struct cmd_and_next_index *retrieve_command_at_index(struct ring_buffer *rb, int index){
 
     if(rb->number_of_commands == 0){
@@ -148,9 +117,7 @@ struct cmd_and_next_index *retrieve_command_at_index(struct ring_buffer *rb, int
         return NULL;
     }
     rb->number_of_commands-=1;
-
     //First check if current index fits the size of the info block
-
     int space_left_in_this_turn = rb->real_size-index;
     /* Special case when the struct will need to be copied partially */
     /* Case 1: cmd info is split between ring buffer turns. */
@@ -222,19 +189,22 @@ bool file_exists(const char *path){
     return access(path, F_OK) != 0;
 }
 
-struct ring_buffer * initialise_ring_buffer_on_persistent_memory(PMEMobjpool *pop){
+PMEMobjpool *mmap_pmem_object_pool(PMEMobjpool *pop){
     char *path_to_pmem = "/mnt/dax/test_outputs/pmem_log_ring_buffer";
     if (file_exists((path_to_pmem)) != 0) {
-    if ((pop = pmemobj_create(path_to_pmem, POBJ_LAYOUT_NAME(list),PMEMOBJ_MIN_POOL, 0666)) == NULL)
+        if ((pop = pmemobj_create(path_to_pmem, POBJ_LAYOUT_NAME(list),PMEMOBJ_MIN_POOL, 0666)) == NULL)
             perror("failed to create pool\n");
     } else {
         if ((pop = pmemobj_open(path_to_pmem, POBJ_LAYOUT_NAME(list))) == NULL) {
             perror("failed to open pool\n");
         }
     }
+    return pop;
+}
+
+struct ring_buffer * initialise_ring_buffer_on_persistent_memory(PMEMobjpool *pop){
     PMEMoid pool_root = pmemobj_root(pop, sizeof(struct pmem_obj_root));
     struct pmem_obj_root *rootp = pmemobj_direct(pool_root);
-
     return &rootp->rb;
 }
 
@@ -242,12 +212,11 @@ void print_head_and_tail(struct ring_buffer *rb){
     printf("Head is at: %d, Tail is at: %d\n", rb->head, rb->tail);
 }
 
-void print_commands_in_the_byffer(struct ring_buffer *rb){
+void print_commands_in_the_buffer(struct ring_buffer *rb){
     printf("Commands in the buffer: %d\n", rb->number_of_commands);
 }
 
-int main() {
-    PMEMobjpool *pop;
+struct ring_buffer *initialise_ring_buffer(PMEMobjpool *pop){
     struct ring_buffer *rb = initialise_ring_buffer_on_persistent_memory(pop);
     rb->size =sizeof(rb->buffer);
     rb->real_size = rb->size-1;
@@ -255,65 +224,54 @@ int main() {
     rb->tail = 0;
     rb->number_of_commands = 0;
     printf("Initialized ring_buffer\n");
+    return rb;
+}
+
+int main() {
+    PMEMobjpool *pop = NULL;
+    pop = mmap_pmem_object_pool(pop);
+    struct ring_buffer *rb = initialise_ring_buffer(pop);
     print_available_buffer_slots(rb);
 
     int cmd_index = 0;
-    /* Case 1 */
-    insert(rb, "abcd");
-    struct cmd_and_next_index *cmd_data = retrieve_command_at_index(rb, cmd_index);
-    cmd_index = cmd_data->next_index;
-    printf("Extracted command: %s, next index: %d\n", cmd_data->command, cmd_data->next_index);
+    struct cmd_and_next_index *cmd_data;
 
-    /* Case 2 */
-    insert(rb, "abcd");
-    cmd_data = retrieve_command_at_index(rb, cmd_index);
-    cmd_index = cmd_data->next_index;
-    printf("Extracted command: %s, next index: %d\n", cmd_data->command, cmd_data->next_index);
+    /* This must fail because command is too long */
+    assert( insert(rb, "foo bar foo bar foo bar foo bar") == 1);
 
-    /* Case 3 */
-    insert(rb, "abcd");
-    cmd_data = retrieve_command_at_index(rb, cmd_index);
-    cmd_index = cmd_data->next_index;
-    printf("Extracted command: %s, next index: %d\n", cmd_data->command, cmd_data->next_index);
-    print_available_buffer_slots(rb);
+    char seen_head_positions[rb->real_size];
+    char seen_tail_positions[rb->real_size];
+    for(int i = 0; i<=rb->real_size; ++i){
+        seen_head_positions[i] = '0';
+        seen_tail_positions[i] = '0';
+    }
 
-    print_head_and_tail(rb);
-    /* Extracting nonexistent command */
-    cmd_data = retrieve_command_at_index(rb, cmd_index);
+    for(int i=0; i < rb->size+1; ++i){
 
+        seen_head_positions[rb->head] = '1';
+        seen_tail_positions[rb->tail] = '1';
 
-    /* Case 4 */
+        insert(rb, "foo bar");
+        assert(rb->head < rb->size);
+        assert(rb->tail < rb->size);
 
-    insert(rb, "abcd");
-    print_head_and_tail(rb);
-    cmd_data = retrieve_command_at_index(rb, cmd_index);
-    cmd_index = cmd_data->next_index;
-    print_head_and_tail(rb);
-    print_available_buffer_slots(rb);
-    print_commands_in_the_byffer(rb);
+        seen_head_positions[rb->head] = '1';
+        seen_tail_positions[rb->tail] = '1';
 
-    /* Case 5 Fits exactly in to the buffer length */
-    insert(rb, "ab");
-    cmd_data = retrieve_command_at_index(rb, cmd_index);
-    cmd_index = cmd_data->next_index;
-    printf("Next index is: %d\n", cmd_index);
-    print_head_and_tail(rb);
+        cmd_data = retrieve_command_at_index(rb, cmd_index);
+        assert(strcmp(cmd_data->command, "foo bar") == 0);
+        cmd_index = cmd_data->next_index;
+    }
 
-    /* Case 6 starts from 0 */
-    insert(rb, "cd");
-    cmd_data = retrieve_command_at_index(rb, cmd_index);
-    cmd_index = cmd_data->next_index;
-    printf("Next index is: %d \n", cmd_index);
-    print_head_and_tail(rb);
+    for(int i = 0; i<=rb->real_size; ++i){
+        assert(seen_head_positions[i] == '1');
+        assert(seen_tail_positions[i] == '1');
+    }
 
-    /* Case 7 */
+    /* This must return NULL if the process tries to retrieve a command which does not exist */
+    assert(retrieve_command_at_index(rb,cmd_index) == NULL);
 
-    insert(rb, "abcdefghijklmn");
-    cmd_data = retrieve_command_at_index(rb, cmd_index);
-    printf("Retrieved command :%s\n", cmd_data->command);
-    cmd_index = cmd_data->next_index;
-    printf("Next index is: %d \n", cmd_index);
-    print_head_and_tail(rb);
+    pmemobj_close(pop);
 
     return 0;
 }
