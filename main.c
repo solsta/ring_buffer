@@ -32,6 +32,10 @@ struct cmd_and_next_index{
 
 
 unsigned int get_free_slots_left_in_the_buffer(struct ring_buffer *rb){
+    /* There is no scenario where this can happen other than on the first iteration */
+    if(rb->head == rb->tail && rb->head == 0){
+        return rb->real_size;
+    }
     return rb->head > rb->tail ? rb->real_size-rb->head + rb->tail : rb->tail - rb->head;
 }
 
@@ -101,13 +105,13 @@ int insert(struct ring_buffer *rb, char *command){
         printf("No space to insert this entry, dropping!\n");
         return 1;
     }
-    if(buffer_has_space_for_command(rb, sizeof command) > 0){
+    if(strlen (command) + sizeof (struct varied_length_command_info) > get_free_slots_left_in_the_buffer(rb)){
+        printf("No space to insert this entry, dropping!\n");
+        return 1;
+    }
         insert_in_to_buffer(rb, command);
         rb->number_of_commands+=1;
         return 0;
-    }
-    printf("No space to insert this entry, dropping!\n");
-    return 1;
 }
 
 struct cmd_and_next_index *retrieve_command_at_index(struct ring_buffer *rb, int index){
@@ -227,6 +231,12 @@ struct ring_buffer *initialise_ring_buffer(PMEMobjpool *pop){
     return rb;
 }
 
+void reset_ring_buffer(struct ring_buffer *rb){
+    rb->head = 0;
+    rb->tail = 0;
+    rb->number_of_commands = 0;
+}
+
 int main() {
     PMEMobjpool *pop = NULL;
     pop = mmap_pmem_object_pool(pop);
@@ -238,6 +248,21 @@ int main() {
 
     /* This must fail because command is too long */
     assert( insert(rb, "foo bar foo bar foo bar foo bar") == 1);
+
+    /* Testing inserting more than buffer can accomodate for */
+    assert(insert(rb, "abcdefghij") == 0);
+    assert(insert(rb, "abcdefghij") == 0);
+    assert(insert(rb, "abcdefghij") == 1);
+    reset_ring_buffer(rb);
+
+    /* Testing a reset scenario */
+    assert(insert(rb, "abcdef") == 0);
+    assert(insert(rb, "abcdef") == 0);
+    assert(insert(rb, "abcdef") == 1);
+    assert(insert(rb, "abcdefg") == 1);
+    assert(insert(rb, "abcde") == 0);
+    assert(rb->head == rb->real_size);
+    reset_ring_buffer(rb);
 
     char seen_head_positions[rb->real_size];
     char seen_tail_positions[rb->real_size];
