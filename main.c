@@ -15,6 +15,7 @@ struct ring_buffer{
     unsigned int tail;
     unsigned int size;
     unsigned int real_size;
+    signed int last_seen_index;
     char buffer[30];
 };
 
@@ -124,16 +125,29 @@ int insert(PMEMobjpool *pop, struct ring_buffer *rb, char *command){
 }
 
 struct cmd_and_next_index *retrieve_command_at_index(PMEMobjpool *pop, struct ring_buffer *rb, int index){
-
-    if(rb->number_of_commands == 0){
-        printf("Buffer is empty\n");
-        return NULL;
-    }
     pmemobj_tx_begin(pop, NULL, TX_PARAM_CB, log_stages, NULL,
                      TX_PARAM_NONE);
-    pmemobj_tx_add_range_direct(&rb->number_of_commands, sizeof (rb->number_of_commands));
+
+
+    if(rb->number_of_commands == 0){
+        if(rb->last_seen_index!=index){
+            printf("Tried to extract incorrect index\n");
+            return NULL;
+        }
+    }
+
+    if(rb->last_seen_index!=index){
+        pmemobj_tx_add_range_direct(&rb->number_of_commands, sizeof (rb->number_of_commands));
+        rb->number_of_commands-=1;
+
+    }
+
+    pmemobj_tx_add_range_direct(&rb->last_seen_index, sizeof (rb->last_seen_index));
+    rb->last_seen_index = index;
+
     pmemobj_tx_add_range_direct(&rb->tail, sizeof (rb->tail));
-    rb->number_of_commands-=1;
+    //Can't just do that
+
     //First check if current index fits the size of the info block
     int space_left_in_this_turn = rb->real_size-index;
     /* Special case when the struct will need to be copied partially */
@@ -247,12 +261,14 @@ struct ring_buffer *initialise_ring_buffer(PMEMobjpool *pop){
     pmemobj_tx_add_range_direct(&rb->head, sizeof (rb->head));
     pmemobj_tx_add_range_direct(&rb->tail, sizeof (rb->tail));
     pmemobj_tx_add_range_direct(&rb->number_of_commands, sizeof (rb->number_of_commands));
+    pmemobj_tx_add_range_direct(&rb->last_seen_index, sizeof (rb->last_seen_index));
 
     rb->size =sizeof(rb->buffer);
     rb->real_size = rb->size-1;
     rb->head = 0;
     rb->tail = 0;
     rb->number_of_commands = 0;
+    rb->last_seen_index = -1;
     printf("Initialized ring_buffer\n");
     pmemobj_tx_commit();
     pmemobj_tx_end();
@@ -265,18 +281,27 @@ void reset_ring_buffer(PMEMobjpool *pop, struct ring_buffer *rb){
     pmemobj_tx_add_range_direct(&rb->head, sizeof (rb->head));
     pmemobj_tx_add_range_direct(&rb->tail, sizeof (rb->tail));
     pmemobj_tx_add_range_direct(&rb->number_of_commands, sizeof (rb->number_of_commands));
+    pmemobj_tx_add_range_direct(&rb->last_seen_index, sizeof (rb->last_seen_index));
     rb->head = 0;
     rb->tail = 0;
     rb->number_of_commands = 0;
+    rb->last_seen_index = -1;
     pmemobj_tx_commit();
     pmemobj_tx_end();
 }
 
 int main() {
+
+
+
     PMEMobjpool *pop = NULL;
     pop = mmap_pmem_object_pool(pop);
     struct ring_buffer *rb = initialise_ring_buffer(pop);
     print_available_buffer_slots(rb);
+
+    /* Test swithing off ASLR */
+    /* 0x7ffff73c0550 */
+    printf("Ring buffer address: %p\n", rb);
 
     int cmd_index = 0;
     struct cmd_and_next_index *cmd_data;
@@ -320,6 +345,9 @@ int main() {
 
         cmd_data = retrieve_command_at_index(pop,rb, cmd_index);
         assert(strcmp(cmd_data->command, "foo bar") == 0);
+        cmd_data = retrieve_command_at_index(pop,rb, cmd_index);
+        assert(strcmp(cmd_data->command, "foo bar") == 0);
+
         cmd_index = cmd_data->next_index;
     }
 
